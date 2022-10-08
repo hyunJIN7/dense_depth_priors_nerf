@@ -18,27 +18,42 @@ def precompute_quadratic_samples(near, far, num_samples):
     b = 2. * start * a
     return a * x.pow(2) + b * x + c
 
-def is_not_in_expected_distribution(depth_mean, depth_var, depth_measurement_mean, depth_measurement_std):
-    delta_greater_than_expected = ((depth_mean - depth_measurement_mean).abs() - depth_measurement_std) > 0.
-    var_greater_than_expected = depth_measurement_std.pow(2) < depth_var
+
+def is_not_in_expected_distribution(depth_mean, depth_var, depth_measurement_mean, depth_measurement_std): #(1023,)
+    delta_greater_than_expected = ((depth_mean - depth_measurement_mean).abs() - depth_measurement_std) > 0. # P
+    var_greater_than_expected = depth_measurement_std.pow(2) < depth_var  # Q
+    return_val = torch.logical_or(delta_greater_than_expected, var_greater_than_expected) #(1023,)
     return torch.logical_or(delta_greater_than_expected, var_greater_than_expected)
 
+# depth_measurement_std :  s(r)
+# depth_var : s^(r) pred_variation
+# target_depth,target_mean : gt depth
+# depth_map_pred_mean : predict depth , z^
 def compute_depth_loss(depth_map, z_vals, weights, target_depth, target_valid_depth):
-    pred_mean = depth_map[target_valid_depth]
-    if pred_mean.shape[0] == 0:
+    depth_map_pred_mean = depth_map[target_valid_depth] # z^
+    if depth_map_pred_mean.shape[0] == 0:
         return torch.zeros((1,), device=depth_map.device, requires_grad=True)
-    pred_var = ((z_vals[target_valid_depth] - pred_mean.unsqueeze(-1)).pow(2) * weights[target_valid_depth]).sum(-1) + 1e-5
+    pred_var = ((z_vals[target_valid_depth] - depth_map_pred_mean.unsqueeze(-1)).pow(2) * weights[target_valid_depth]).sum(-1) + 1e-5
+    #s^(depth_var)        =        (z_val         -   predict depth^2   )                      *  weights
     target_mean = target_depth[..., 0][target_valid_depth]
+    # = gt_depth  , z(r)
     target_std = target_depth[..., 1][target_valid_depth]
-    apply_depth_loss = is_not_in_expected_distribution(pred_mean, pred_var, target_mean, target_std)
-    pred_mean = pred_mean[apply_depth_loss]
-    if pred_mean.shape[0] == 0:
+    # = gt_vari, s(r)
+    apply_depth_loss = is_not_in_expected_distribution(depth_map_pred_mean,     pred_var,         target_mean, target_std)
+    #(1023,) true,false                                  z^(predict_depth) , s^(pred_variation)  ,  z(gt_depth), s(gt_varia)
+
+    depth_map_pred_mean = depth_map_pred_mean[apply_depth_loss]
+    #  z^(predict_depth)
+    if depth_map_pred_mean.shape[0] == 0:
         return torch.zeros((1,), device=depth_map.device, requires_grad=True)
     pred_var = pred_var[apply_depth_loss]
     target_mean = target_mean[apply_depth_loss]
     target_std = target_std[apply_depth_loss]
     f = nn.GaussianNLLLoss(eps=0.001)
-    return float(pred_mean.shape[0]) / float(target_valid_depth.shape[0]) * f(pred_mean, target_mean, pred_var)
+    a = float(depth_map_pred_mean.shape[0]) #1023
+    b = float(target_valid_depth.shape[0])  #1024
+    c = f(depth_map_pred_mean, target_mean, pred_var)
+    return float(depth_map_pred_mean.shape[0]) / float(target_valid_depth.shape[0]) * f(depth_map_pred_mean, target_mean, pred_var)
 
 class DenseLayer(nn.Linear):
     def __init__(self, in_dim: int, out_dim: int, activation: str = "relu", *args, **kwargs) -> None:
